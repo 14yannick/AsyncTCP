@@ -59,6 +59,15 @@ class AsyncClient;
 #define ASYNC_WRITE_FLAG_COPY 0x01 //will allocate new buffer to hold the data while sending (else will hold reference to the data given)
 #define ASYNC_WRITE_FLAG_MORE 0x02 //will not send PSH flag, meaning that there should be more data to be sent before the application should react.
 
+// Fix for webserver crashes due to race conditions, cause "send()"" - caller uses other task (thread) than XYHandler
+// and there is no mutex - locking. 
+// With "post()" the caller function can run async in the XYHandler - task. So no locking required.
+namespace Async
+{
+typedef std::function<void(void*, void*)> AsyncFunc;
+void post(AsyncFunc func, void* param1, void* param2);
+} // namespace Async
+
 typedef std::function<void(void*, AsyncClient*)> AcConnectHandler;
 typedef std::function<void(void*, AsyncClient*, size_t len, uint32_t time)> AcAckHandler;
 typedef std::function<void(void*, AsyncClient*, int8_t error)> AcErrorHandler;

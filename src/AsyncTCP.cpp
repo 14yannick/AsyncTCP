@@ -37,8 +37,10 @@ extern "C"{
  * TCP/IP Event Task
  * */
 
+constexpr auto ASYNC_EVENT_QUEUE_SIZE = 256;
+
 typedef enum {
-    LWIP_TCP_SENT, LWIP_TCP_RECV, LWIP_TCP_FIN, LWIP_TCP_ERROR, LWIP_TCP_POLL, LWIP_TCP_CLEAR, LWIP_TCP_ACCEPT, LWIP_TCP_CONNECTED, LWIP_TCP_DNS
+    LWIP_TCP_SENT, LWIP_TCP_RECV, LWIP_TCP_FIN, LWIP_TCP_ERROR, LWIP_TCP_POLL, LWIP_TCP_CLEAR, LWIP_TCP_ACCEPT, LWIP_TCP_CONNECTED, LWIP_TCP_DNS, ASYNC_FUNC
 } lwip_event_t;
 
 typedef struct {
@@ -75,6 +77,10 @@ typedef struct {
                         const char * name;
                         ip_addr_t addr;
                 } dns;
+                struct {
+                        void* param1;
+                        void* param2;
+                } async_func;
         };
 } lwip_event_packet_t;
 
@@ -97,7 +103,7 @@ static uint32_t _closed_index = []() {
 
 static inline bool _init_async_event_queue(){
     if(!_async_queue){
-        _async_queue = xQueueCreate(32, sizeof(lwip_event_packet_t *));
+        _async_queue = xQueueCreate(ASYNC_EVENT_QUEUE_SIZE, sizeof(lwip_event_packet_t *));
         if(!_async_queue){
             return false;
         }
@@ -183,13 +189,28 @@ static void _handle_async_event(lwip_event_packet_t * e){
     } else if(e->event == LWIP_TCP_DNS){
         //ets_printf("D: 0x%08x %s = %s\n", e->arg, e->dns.name, ipaddr_ntoa(&e->dns.addr));
         AsyncClient::_s_dns_found(e->dns.name, &e->dns.addr, e->arg);
+    } else if(e->event == ASYNC_FUNC){
+        // ets_printf("***Async func calling\n");
+        auto func = static_cast<Async::AsyncFunc*>(e->arg);
+        (*func)(e->async_func.param1, e->async_func.param2);
+        delete func;
     }
     free((void*)(e));
 }
 
 static void _async_service_task(void *pvParameters){
     lwip_event_packet_t * packet = NULL;
+    const uint32_t low_item_count = ASYNC_EVENT_QUEUE_SIZE / 10;
     for (;;) {
+
+        const auto cur_item_count = uxQueueSpacesAvailable(_async_queue);
+        if (cur_item_count < low_item_count)
+        {
+            // This should never happen, but at least show it.
+            // Cannot simply empty it, that would create leaks.
+            ets_printf("low _async_queue free item count = %d.\n", cur_item_count);
+        }
+
         if(_get_async_event(&packet)){
 #if CONFIG_ASYNC_TCP_USE_WDT
             if(esp_task_wdt_add(NULL) != ESP_OK){
@@ -1462,3 +1483,24 @@ int8_t AsyncServer::_s_accept(void * arg, tcp_pcb * pcb, int8_t err){
 int8_t AsyncServer::_s_accepted(void *arg, AsyncClient* client){
     return reinterpret_cast<AsyncServer*>(arg)->_accepted(client);
 }
+
+
+namespace Async
+{
+void post(AsyncFunc func, void* param1, void* param2)
+{
+    lwip_event_packet_t* e = (lwip_event_packet_t*)malloc(sizeof(lwip_event_packet_t));
+    e->event = ASYNC_FUNC;
+    Async::AsyncFunc* async_func = new Async::AsyncFunc(std::move(func));
+    e->arg = static_cast<void*>(async_func);
+    e->async_func.param1 = param1;
+    e->async_func.param2 = param2;
+    // ets_printf("***Async func posting...\n");
+    if (!_send_async_event(&e)) 
+    {
+        delete async_func;
+        free((void*)(e));
+        ets_printf("ERROR: Async func post failed\n");
+    }
+}
+} // namespace Async
